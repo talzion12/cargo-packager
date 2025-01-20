@@ -767,8 +767,6 @@ impl Update {
 
         let mut temp_file = tempfile::Builder::new().suffix(extension).tempfile()?;
         temp_file.write_all(&bytes)?;
-        let (f, path) = temp_file.keep()?;
-        drop(f);
 
         let system_root = std::env::var("SYSTEMROOT");
         let powershell_path = system_root.as_ref().map_or_else(
@@ -785,7 +783,7 @@ impl Update {
                 // we need to wrap the installer path in quotes for Start-Process
                 let mut installer_path = std::ffi::OsString::new();
                 installer_path.push("\"");
-                installer_path.push(&path);
+                installer_path.push(&temp_file.path());
                 installer_path.push("\"");
 
                 let installer_args = self
@@ -819,8 +817,6 @@ impl Update {
                     cmd.arg("-ArgumentList").arg(installer_args.join(", "));
                 }
                 cmd.spawn().expect("installer failed to start");
-
-                std::process::exit(0);
             }
             UpdateFormat::Wix => {
                 {
@@ -832,7 +828,7 @@ impl Update {
 
                     let mut mis_path = std::ffi::OsString::new();
                     mis_path.push("\"\"\"");
-                    mis_path.push(&path);
+                    mis_path.push(&temp_file.path());
                     mis_path.push("\"\"\"");
 
                     let installer_args = self
@@ -856,43 +852,26 @@ impl Update {
                     ]
                     .concat();
 
-                    // run the installer and relaunch the application
-                    let powershell_install_res = Command::new(powershell_path)
-                        .creation_flags(CREATE_NO_WINDOW)
-                        .args(["-NoProfile", "-WindowStyle", "Hidden"])
-                        .args([
-                            "Start-Process",
-                            "-Wait",
-                            "-FilePath",
-                            "$env:SYSTEMROOT\\System32\\msiexec.exe",
-                            "-ArgumentList",
-                        ])
-                        .arg("/i,")
-                        .arg(&mis_path)
-                        .arg(format!(", {}, /promptrestart;", installer_args.join(", ")))
-                        .arg("Start-Process")
-                        .arg(current_exe_arg)
-                        .spawn();
-                    if powershell_install_res.is_err() {
-                        // fallback to running msiexec directly - relaunch won't be available
-                        // we use this here in case powershell fails in an older machine somehow
-                        let msiexec_path = system_root.as_ref().map_or_else(
-                            |_| "msiexec.exe".to_string(),
-                            |p| format!("{p}\\System32\\msiexec.exe"),
-                        );
-                        let _ = Command::new(msiexec_path)
-                            .arg("/i")
-                            .arg(mis_path)
-                            .args(installer_args)
-                            .arg("/promptrestart")
-                            .spawn();
-                    }
-
-                    std::process::exit(0);
+                let msiexec_path = system_root.as_ref().map_or_else(
+                    |_| "msiexec.exe".to_string(),
+                    |p| format!("{p}\\System32\\msiexec.exe"),
+                );
+                let _ = Command::new(msiexec_path)
+                    .arg("/i")
+                    .arg(mis_path)
+                    .args(installer_args)
+                    .arg("/promptrestart")
+                    .spawn();
                 }
             }
             _ => unreachable!(),
         }
+
+        if let Err(error) = temp_file.close() {
+            tracing::error("Failed to close temp file: {:?}", error);
+        };
+
+        std::process::exit(0);
     }
 
     // Linux (AppImage)
