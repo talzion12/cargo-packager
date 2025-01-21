@@ -868,7 +868,7 @@ impl Update {
         }
 
         if let Err(error) = temp_file.close() {
-            tracing::error("Failed to close temp file: {:?}", error);
+            println!("Failed to close temp file: {:?}", error);
         };
 
         std::process::exit(0);
