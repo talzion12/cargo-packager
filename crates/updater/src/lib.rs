@@ -819,38 +819,26 @@ impl Update {
                 cmd.spawn().expect("installer failed to start");
             }
             UpdateFormat::Wix => {
-                {
-                    // we need to wrap the current exe path in quotes for Start-Process
-                    let mut current_exe_arg = std::ffi::OsString::new();
-                    current_exe_arg.push("\"");
-                    current_exe_arg.push(current_exe()?);
-                    current_exe_arg.push("\"");
-
-                    let mut mis_path = std::ffi::OsString::new();
-                    mis_path.push("\"\"\"");
-                    mis_path.push(&temp_file.path());
-                    mis_path.push("\"\"\"");
-
-                    let installer_args = self
-                        .config
+                let installer_args = self
+                    .config
+                    .windows
+                    .as_ref()
+                    .and_then(|w| w.installer_args.clone())
+                    .unwrap_or_default();
+                let installer_args = [
+                    self.config
                         .windows
                         .as_ref()
-                        .and_then(|w| w.installer_args.clone())
-                        .unwrap_or_default();
-                    let installer_args = [
-                        self.config
-                            .windows
-                            .as_ref()
-                            .and_then(|w| w.install_mode.clone())
-                            .unwrap_or_default()
-                            .msiexec_args(),
-                        installer_args
-                            .iter()
-                            .map(AsRef::as_ref)
-                            .collect::<Vec<_>>()
-                            .as_slice(),
-                    ]
-                    .concat();
+                        .and_then(|w| w.install_mode.clone())
+                        .unwrap_or_default()
+                        .msiexec_args(),
+                    installer_args
+                        .iter()
+                        .map(AsRef::as_ref)
+                        .collect::<Vec<_>>()
+                        .as_slice(),
+                ]
+                .concat();
 
                 let msiexec_path = system_root.as_ref().map_or_else(
                     |_| "msiexec.exe".to_string(),
@@ -858,11 +846,10 @@ impl Update {
                 );
                 let _ = Command::new(msiexec_path)
                     .arg("/i")
-                    .arg(mis_path)
+                    .arg(temp_file.path())
                     .args(installer_args)
                     .arg("/promptrestart")
                     .spawn();
-                }
             }
             _ => unreachable!(),
         }
