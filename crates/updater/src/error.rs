@@ -66,6 +66,9 @@ pub enum Error {
     /// Error returned when persisting a temporary file fails.
     #[error(transparent)]
     PersistError(#[from] tempfile::PersistError),
+    /// Error returned when the updater fails to upgrade the application.
+    #[error("The upgrade operation failed: {0}")]
+    UpgradeFailed(String)
 }
 
 /// Convenience alias for `cargo-packager-updater` crate Result type.

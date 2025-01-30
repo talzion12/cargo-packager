@@ -767,6 +767,8 @@ impl Update {
 
         let mut temp_file = tempfile::Builder::new().suffix(extension).tempfile()?;
         temp_file.write_all(&bytes)?;
+        temp_file.flush()?;
+        let temp_path = temp_file.into_temp_path();
 
         let system_root = std::env::var("SYSTEMROOT");
         let powershell_path = system_root.as_ref().map_or_else(
@@ -783,7 +785,7 @@ impl Update {
                 // we need to wrap the installer path in quotes for Start-Process
                 let mut installer_path = std::ffi::OsString::new();
                 installer_path.push("\"");
-                installer_path.push(&temp_file.path());
+                installer_path.push(&temp_path);
                 installer_path.push("\"");
 
                 let installer_args = self
@@ -845,11 +847,11 @@ impl Update {
                     |p| format!("{p}\\System32\\msiexec.exe"),
                 );
 
-                tracing::info!("Running msiexec: {msiexec_path} /i {:?} {:?}", temp_file.path(), installer_args);
+                tracing::info!("Running msiexec: {msiexec_path} /i {:?} {:?}", temp_path, installer_args);
 
                 let output = Command::new(msiexec_path)
                     .arg("/i")
-                    .arg(temp_file.path())
+                    .arg(&temp_path)
                     .args(installer_args)
                     .output()?;
 
@@ -862,19 +864,28 @@ impl Update {
                         .unwrap_or_else(|error| format!("{:?}", error.into_bytes()));
 
                     tracing::error!(
-                        "MSI installer failed to execute: exit code: {}, stdout: {:?}, stderr: {:?}",
+                        "MSI installer failed to execute: exit code: {}, stdout: {}, stderr: {}",
                         output.status,
                         stdout,
                         stderr
                     );
+
+                    return Err(Error::UpgradeFailed(
+                        format!("MSI installer failed to execute: exit code: {}, stdout: {}, stderr: {}",
+                        output.status,
+                        stdout,
+                        stderr
+                    )));
                 }
             }
             _ => unreachable!(),
         }
 
-        if let Err(error) = temp_file.close() {
+        if let Err(error) = temp_path.close() {
             tracing::warn!("Failed to close temp file: {error:?}");
         };
+
+        tracing::info!("Update installed successfully, exiting...");
 
         std::process::exit(0);
     }
