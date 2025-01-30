@@ -844,18 +844,36 @@ impl Update {
                     |_| "msiexec.exe".to_string(),
                     |p| format!("{p}\\System32\\msiexec.exe"),
                 );
-                let _ = Command::new(msiexec_path)
+
+                tracing::info!("Running msiexec: {msiexec_path} /i {:?} {:?}", temp_file.path(), installer_args);
+
+                let output = Command::new(msiexec_path)
                     .arg("/i")
                     .arg(temp_file.path())
                     .args(installer_args)
-                    .arg("/promptrestart")
-                    .spawn();
+                    .output()?;
+
+                if output.status.success() {
+                    tracing::info!("MSI installer executed successfully");
+                } else {
+                    let stdout = String::from_utf8(output.stdout)
+                        .unwrap_or_else(|error| format!("{:?}", error.into_bytes()));
+                    let stderr = String::from_utf8(output.stderr)
+                        .unwrap_or_else(|error| format!("{:?}", error.into_bytes()));
+
+                    tracing::error!(
+                        "MSI installer failed to execute: exit code: {}, stdout: {:?}, stderr: {:?}",
+                        output.status,
+                        stdout,
+                        stderr
+                    );
+                }
             }
             _ => unreachable!(),
         }
 
         if let Err(error) = temp_file.close() {
-            println!("Failed to close temp file: {:?}", error);
+            tracing::warn!("Failed to close temp file: {error:?}");
         };
 
         std::process::exit(0);
