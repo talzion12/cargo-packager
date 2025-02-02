@@ -149,7 +149,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    io::{Cursor, Read},
+    io::{Read, Seek, Write},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -221,6 +221,7 @@ pub struct Config {
     /// - `{{target}}`: The operating system name (one of `linux`, `windows` or `macos`).
     /// - `{{arch}}`: The architecture of the machine (one of `x86_64`, `i686`, `aarch64` or `armv7`).
     pub endpoints: Vec<Url>,
+    pub download_dir: PathBuf,
     /// Signature public key.
     pub pubkey: String,
     /// The Windows configuration for the updater.
@@ -632,7 +633,7 @@ impl Update {
     /// Downloads the updater package, verifies it then return it as bytes.
     ///
     /// Use [`Update::install`] to install it
-    pub fn download(&self) -> Result<Vec<u8>> {
+    pub fn download(&self) -> Result<PathBuf> {
         self.download_extended_inner(
             None::<Box<dyn Fn(usize, Option<u64>)>>,
             None::<Box<dyn FnOnce()>>,
@@ -649,7 +650,7 @@ impl Update {
         &self,
         on_chunk: C,
         on_download_finish: D,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<PathBuf> {
         self.download_extended_inner(Some(on_chunk), Some(on_download_finish))
     }
 
@@ -657,7 +658,7 @@ impl Update {
         &self,
         on_chunk: Option<C>,
         on_download_finish: Option<D>,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<PathBuf> {
         // set our headers
         let mut headers = self.headers.clone();
         headers.insert(
@@ -711,29 +712,40 @@ impl Update {
             on_chunk,
         };
 
-        let mut buffer = Vec::new();
+        let extension = match self.format {
+            UpdateFormat::Nsis => ".exe",
+            UpdateFormat::Wix => ".msi",
+            UpdateFormat::AppImage => ".AppImage",
+            UpdateFormat::App => ".app",
+        };
 
-        let _ = std::io::copy(&mut source, &mut buffer)?;
+        std::fs::create_dir_all(&self.config.download_dir)?;
+        let output_file_name = format!("update-{}-{}.{}", self.version, self.signature, extension);
+        let output_path = self.config.download_dir.join(output_file_name);
+        let mut output_file = std::fs::OpenOptions::new().create(true).read(true).truncate(true).open(&output_path)?;
+
+        let _ = std::io::copy(&mut source, &mut output_file)?;
         if let Some(on_download_finish) = on_download_finish {
             on_download_finish();
         }
 
-        let mut update_buffer = Cursor::new(&buffer);
+        output_file.flush()?;
+        output_file.seek(std::io::SeekFrom::Start(0))?;
 
-        verify_signature(&mut update_buffer, &self.signature, &self.config.pubkey)?;
+        verify_signature(&mut output_file, &self.signature, &self.config.pubkey)?;
 
-        Ok(buffer)
+        Ok(output_path)
     }
 
     /// Installs the updater package downloaded by [`Update::download`]
-    pub fn install(&self, bytes: Vec<u8>) -> Result<()> {
-        self.install_inner(bytes)
+    pub fn install(&self, path: &Path) -> Result<()> {
+        self.install_inner(path)
     }
 
     /// Downloads and installs the updater package
     pub fn download_and_install(&self) -> Result<()> {
-        let bytes = self.download()?;
-        self.install(bytes)
+        let path = self.download()?;
+        self.install(&path)
     }
 
     /// Downloads and installs the updater package
@@ -756,19 +768,14 @@ impl Update {
     // │── [AppName]_[version]_x64-setup.exe           # NSIS installer
     // └── ...
     #[cfg(windows)]
-    fn install_inner(&self, bytes: Vec<u8>) -> Result<()> {
-        use std::{io::Write, os::windows::process::CommandExt, process::Command};
+    fn install_inner(&self, path: &Path) -> Result<()> {
+        use std::{os::windows::process::CommandExt, process::Command};
 
         let extension = match self.format {
             UpdateFormat::Nsis => ".exe",
             UpdateFormat::Wix => ".msi",
             _ => return Err(crate::Error::UnsupportedUpdateFormat),
         };
-
-        let mut temp_file = tempfile::Builder::new().suffix(extension).tempfile()?;
-        temp_file.write_all(&bytes)?;
-        temp_file.flush()?;
-        let temp_path = temp_file.into_temp_path();
 
         let system_root = std::env::var("SYSTEMROOT");
         let powershell_path = system_root.as_ref().map_or_else(
@@ -785,7 +792,7 @@ impl Update {
                 // we need to wrap the installer path in quotes for Start-Process
                 let mut installer_path = std::ffi::OsString::new();
                 installer_path.push("\"");
-                installer_path.push(&temp_path);
+                installer_path.push(path);
                 installer_path.push("\"");
 
                 let installer_args = self
@@ -847,45 +854,18 @@ impl Update {
                     |p| format!("{p}\\System32\\msiexec.exe"),
                 );
 
-                tracing::info!("Running msiexec: {msiexec_path} /i {:?} {:?}", temp_path, installer_args);
+                tracing::info!("Running msiexec: {msiexec_path} /i {path:?} {installer_args:?}");
 
                 let output = Command::new(msiexec_path)
                     .arg("/i")
-                    .arg(&temp_path)
+                    .arg(path)
                     .args(installer_args)
-                    .output()?;
-
-                if output.status.success() {
-                    tracing::info!("MSI installer executed successfully");
-                } else {
-                    let stdout = String::from_utf8(output.stdout)
-                        .unwrap_or_else(|error| format!("{:?}", error.into_bytes()));
-                    let stderr = String::from_utf8(output.stderr)
-                        .unwrap_or_else(|error| format!("{:?}", error.into_bytes()));
-
-                    tracing::error!(
-                        "MSI installer failed to execute: exit code: {}, stdout: {}, stderr: {}",
-                        output.status,
-                        stdout,
-                        stderr
-                    );
-
-                    return Err(Error::UpgradeFailed(
-                        format!("MSI installer failed to execute: exit code: {}, stdout: {}, stderr: {}",
-                        output.status,
-                        stdout,
-                        stderr
-                    )));
-                }
+                    .spawn()?;
             }
             _ => unreachable!(),
         }
 
-        if let Err(error) = temp_path.close() {
-            tracing::warn!("Failed to close temp file: {error:?}");
-        };
-
-        tracing::info!("Update installed successfully, exiting...");
+        tracing::info!("Started installer, exiting...");
 
         std::process::exit(0);
     }
@@ -970,11 +950,11 @@ impl Update {
     // │          └── ...
     // └── ...
     #[cfg(target_os = "macos")]
-    fn install_inner(&self, bytes: Vec<u8>) -> Result<()> {
+    fn install_inner(&self, path: &Path) -> Result<()> {
         use flate2::read::GzDecoder;
         use std::fs;
 
-        let cursor = Cursor::new(bytes);
+        let cursor = std::fs::File::open(path)?;
 
         // the first file in the tar.gz will always be
         // <app_name>/Contents
